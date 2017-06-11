@@ -1,28 +1,39 @@
 package genericpipeline
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 )
 
-// Execute is function that represent a Command for the  pipeline
-type Func interface {}
+// Execute is function that represent a function for the pipeline
+type Func interface{}
 
 type Pipeline struct {
 	kindOfFirstInput reflect.Kind
-	funcs []Func
-	cw *connectorenWrapper
-	errChan chan error
+	funcs            []Func
+	cw               *connectorenWrapper
+	errChan          chan error
 }
 
 // New builds pipeline
-// The parameter "Input" is a inital value for the  pipeline.
-// The parameters "command" are commands for the  pipline
+// The parameter "Input" is a inital value for the pipeline.
+// The parameters "command" are commands for the pipline
 func Create(funcs ...Func) (*Pipeline, error) {
 	p := new(Pipeline)
 	p.ValidateFuncs(funcs)
 	p.funcs = append(make([]Func, 0, len(funcs)), funcs...)
-	if err := p.Setup(); err != nil {
+	if err := p.Setup(context.TODO()); err != nil {
+		return p, err
+	}
+	return p, nil
+}
+
+func CreateWithContext(ctx context.Context, funcs ...Func) (*Pipeline, error) {
+	p := new(Pipeline)
+	p.ValidateFuncs(funcs)
+	p.funcs = append(make([]Func, 0, len(funcs)), funcs...)
+	if err := p.Setup(ctx); err != nil {
 		return p, err
 	}
 	return p, nil
@@ -40,7 +51,7 @@ func (cw *connectorenWrapper) getLastConnector() chan interface{} {
 	return cw.Connectoren[len(cw.Connectoren)-1]
 }
 
-func (p *Pipeline) ValidateFuncs(funcs []Func){
+func (p *Pipeline) ValidateFuncs(funcs []Func) {
 	firstFunc := true
 	var outType reflect.Kind
 	for _, f := range funcs {
@@ -71,7 +82,7 @@ func (p *Pipeline) ValidateFuncs(funcs []Func){
 	}
 }
 
-func (p *Pipeline) Setup() error {
+func (p *Pipeline) Setup(ctx context.Context) error {
 
 	if len(p.funcs) < 2 {
 		return fmt.Errorf("Added to less funcs (Count: %d)", len(p.funcs))
@@ -80,7 +91,15 @@ func (p *Pipeline) Setup() error {
 	p.errChan = make(chan error)
 	p.cw = p.createConnectors(len(p.funcs) + 1)
 	for index, f := range p.funcs {
-		go p.convertToFuncWrapper(funcWrapperParam{f, p.cw.Connectoren[index], p.cw.Connectoren[index+1], p.errChan})()
+		param := funcWrapperParam{
+			funky:  f,
+			input:  p.cw.Connectoren[index],
+			output: p.cw.Connectoren[index+1],
+			err:    p.errChan,
+			ctx:    ctx,
+		}
+
+		go p.convertToFuncWrapper(param)()
 	}
 
 	return nil
@@ -92,7 +111,7 @@ func (p *Pipeline) Output() (interface{}, error) {
 	var output interface{}
 
 	select {
-	case err = <- p.errChan:
+	case err = <-p.errChan:
 		return nil, err
 	case output = <-p.cw.getLastConnector():
 		return output, nil
@@ -104,11 +123,11 @@ func (p *Pipeline) Output() (interface{}, error) {
 func (p *Pipeline) Input(v interface{}) {
 
 	if p.kindOfFirstInput != reflect.TypeOf(reflect.ValueOf(v).Interface()).Kind() {
-			panic("value must be exactly the same kind")
+		panic("value must be exactly the same kind")
 	}
 
 	connector := p.cw.getFirstConnector()
-	connector <-v
+	connector <- v
 }
 
 func (p *Pipeline) createConnectors(funcCount int) *connectorenWrapper {
@@ -131,17 +150,27 @@ func (p *Pipeline) closeConnectors(connectoren []chan interface{}) {
 }
 
 type funcWrapperParam struct {
-	f Func
-	input   chan interface{}
-	output  chan interface{}
-	err     chan error
+	funky  Func
+	input  chan interface{}
+	output chan interface{}
+	err    chan error
+	ctx    context.Context
 }
 
 func (p *Pipeline) convertToFuncWrapper(param funcWrapperParam) func() {
 	return func() {
 		input := <-param.input
+
+		select {
+		case <-param.ctx.Done():
+			param.err <- param.ctx.Err()
+			return
+		default:
+
+		}
+
 		inputVals := []reflect.Value{reflect.ValueOf(input)}
-		outputVals := reflect.ValueOf(param.f).Call(inputVals)
+		outputVals := reflect.ValueOf(param.funky).Call(inputVals)
 		data := outputVals[0].Interface()
 		err, ok := outputVals[1].Interface().(error)
 		if ok && err != nil {
@@ -151,5 +180,3 @@ func (p *Pipeline) convertToFuncWrapper(param funcWrapperParam) func() {
 		}
 	}
 }
-
-
