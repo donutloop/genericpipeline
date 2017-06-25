@@ -14,24 +14,27 @@ type Pipeline struct {
 	funcs            []Func
 	cw               *connectorenWrapper
 	errChan          chan error
+	maxItemsPerQueue int
 }
 
 // New builds pipeline
 // The parameter "Input" is a inital value for the pipeline.
 // The parameters "command" are commands for the pipline
-func Create(funcs ...Func) (*Pipeline, error) {
+func Create(maxItemsPerQueue int, funcs ...Func) (*Pipeline, error) {
 	p := new(Pipeline)
 	p.ValidateFuncs(funcs)
+	p.maxItemsPerQueue = maxItemsPerQueue
 	p.funcs = append(make([]Func, 0, len(funcs)), funcs...)
-	if err := p.Setup(context.TODO()); err != nil {
+	if err := p.Setup(context.Background()); err != nil {
 		return p, err
 	}
 	return p, nil
 }
 
-func CreateWithContext(ctx context.Context, funcs ...Func) (*Pipeline, error) {
+func CreateWithContext(ctx context.Context, maxItemsPerQueue int, funcs ...Func) (*Pipeline, error) {
 	p := new(Pipeline)
 	p.ValidateFuncs(funcs)
+	p.maxItemsPerQueue = maxItemsPerQueue
 	p.funcs = append(make([]Func, 0, len(funcs)), funcs...)
 	if err := p.Setup(ctx); err != nil {
 		return p, err
@@ -64,7 +67,7 @@ func (p *Pipeline) ValidateFuncs(funcs []Func) {
 		case fnType.NumIn() != 1:
 			panic("value must take exactly one input argument")
 		case fnType.NumOut() != 2:
-			panic("value must take exactly one input argument")
+			panic("value must take exactly twq output arguments")
 		}
 
 		if firstFunc {
@@ -88,8 +91,8 @@ func (p *Pipeline) Setup(ctx context.Context) error {
 		return fmt.Errorf("Added to less funcs (Count: %d)", len(p.funcs))
 	}
 
-	p.errChan = make(chan error)
-	p.cw = p.createConnectors(len(p.funcs) + 1)
+	p.errChan = make(chan error, p.maxItemsPerQueue)
+	p.cw = p.createConnectors(len(p.funcs)+1, p.maxItemsPerQueue)
 	for index, f := range p.funcs {
 		param := funcWrapperParam{
 			funky:  f,
@@ -130,14 +133,14 @@ func (p *Pipeline) Input(v interface{}) {
 	connector <- v
 }
 
-func (p *Pipeline) createConnectors(funcCount int) *connectorenWrapper {
+func (p *Pipeline) createConnectors(funcCount int, maxItemsPerQueue int) *connectorenWrapper {
 
 	cw := &connectorenWrapper{
 		Connectoren: make([]chan interface{}, funcCount),
 	}
 
 	for index := 0; index < funcCount; index++ {
-		cw.Connectoren[index] = make(chan interface{})
+		cw.Connectoren[index] = make(chan interface{}, maxItemsPerQueue)
 	}
 
 	return cw
@@ -159,24 +162,26 @@ type funcWrapperParam struct {
 
 func (p *Pipeline) convertToFuncWrapper(param funcWrapperParam) func() {
 	return func() {
-		input := <-param.input
+		for {
+			input := <-param.input
 
-		select {
-		case <-param.ctx.Done():
-			param.err <- param.ctx.Err()
-			return
-		default:
+			select {
+			case <-param.ctx.Done():
+				param.err <- param.ctx.Err()
+				return
+			default:
 
-		}
+			}
 
-		inputVals := []reflect.Value{reflect.ValueOf(input)}
-		outputVals := reflect.ValueOf(param.funky).Call(inputVals)
-		data := outputVals[0].Interface()
-		err, ok := outputVals[1].Interface().(error)
-		if ok && err != nil {
-			param.err <- err
-		} else {
-			param.output <- data
+			inputVals := []reflect.Value{reflect.ValueOf(input)}
+			outputVals := reflect.ValueOf(param.funky).Call(inputVals)
+			data := outputVals[0].Interface()
+			err, ok := outputVals[1].Interface().(error)
+			if ok && err != nil {
+				param.err <- err
+			} else {
+				param.output <- data
+			}
 		}
 	}
 }
